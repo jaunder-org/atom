@@ -2,7 +2,7 @@ use quick_xml::{
     escape::{escape, resolve_predefined_entity},
     events::{attributes::Attribute, Event},
     name::QName,
-    Reader,
+    Reader, XmlVersion,
 };
 
 use crate::error::{Error, XmlError};
@@ -30,7 +30,7 @@ pub(crate) fn attr_value<'s, 'r, B: BufRead>(
     reader: &'r Reader<B>,
 ) -> Result<Cow<'s, str>, Error> {
     let value = attr
-        .decode_and_unescape_value(reader.decoder())
+        .decoded_and_normalized_value(XmlVersion::default(), reader.decoder())
         .map_err(XmlError::new)?;
     Ok(value)
 }

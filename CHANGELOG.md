@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.12.9 - 2026-07-03
+
+- Update `quick-xml` to `0.41` and migrate to the normalized quick-xml attribute API. [`#95`](https://github.com/rust-syndication/atom/pull/95)
+
 ## 0.12.8 - 2026-05-10
 
 - Enables the parsing of elements defined in another namespace in Person constructs [`#91`](https://github.com/rust-syndication/atom/pull/91)
