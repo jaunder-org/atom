@@ -6,7 +6,7 @@ use std::io::BufReader;
 use atom::Error;
 
 use crate::atom::extension::ExtensionMap;
-use crate::atom::{Feed, Text};
+use crate::atom::{Entry, Feed, Text};
 
 macro_rules! feed {
     ($f:expr) => {{
@@ -326,4 +326,48 @@ fn generator_invalid_uri() {
 fn generator_invalid_version() {
     let result = Feed::read_from("<feed><generator version=\"&;\"></generator></feed>".as_bytes());
     assert!(matches!(result, Err(Error::Xml(_))));
+}
+
+#[test]
+fn read_standalone_entry() {
+    let file = File::open("tests/data/standalone_entry.xml").unwrap();
+    let entry = Entry::read_from(BufReader::new(file)).unwrap();
+    assert_eq!(entry.title(), "Entry Title");
+    assert_eq!(entry.id(), "http://example.com/article/1");
+    assert_eq!(entry.updated().to_rfc3339(), "2017-06-03T15:15:44-05:00");
+    assert_eq!(
+        entry.published().map(|d| d.to_rfc3339()).as_deref(),
+        Some("2017-06-01T08:30:00-05:00")
+    );
+    assert_eq!(entry.summary().map(Text::as_str), Some("Entry summary"));
+    let content = entry.content().unwrap();
+    assert_eq!(content.content_type(), Some("html"));
+    assert_eq!(content.value(), Some("<p>Entry body</p>"));
+    assert_eq!(entry.categories().len(), 1);
+    assert_eq!(entry.categories()[0].term(), "technology");
+    assert_eq!(entry.links().len(), 1);
+    assert_eq!(entry.links()[0].rel(), "edit");
+    // Foreign-markup extension is preserved in the extension map.
+    let app = entry.extensions().get("app").unwrap();
+    assert!(app.contains_key("control"));
+}
+
+#[test]
+fn read_standalone_entry_from_str() {
+    let entry: Entry = "<entry xmlns=\"http://www.w3.org/2005/Atom\"><title>T</title></entry>"
+        .parse()
+        .unwrap();
+    assert_eq!(entry.title(), "T");
+}
+
+#[test]
+fn read_standalone_entry_rejects_non_entry_root() {
+    let result = Entry::read_from("<feed xmlns=\"http://www.w3.org/2005/Atom\"></feed>".as_bytes());
+    assert!(matches!(result, Err(Error::InvalidStartTag)));
+}
+
+#[test]
+fn read_standalone_entry_eof_without_root() {
+    let result = Entry::read_from("<?xml version=\"1.0\"?>".as_bytes());
+    assert!(matches!(result, Err(Error::Eof)));
 }

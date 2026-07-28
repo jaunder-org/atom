@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add standalone entry I/O: `Entry::read_from`, `Entry::write_to`, `Entry::write_with_config`, and `FromStr`/`ToString` impls, mirroring the existing `Feed` API. Standalone serialization declares the Atom namespace on the `<entry>` root; entries embedded in a `<feed>` do not.
+
 ## 0.12.9 - 2026-07-03
 
 - Update `quick-xml` to `0.41` and migrate to the normalized quick-xml attribute API. [`#95`](https://github.com/rust-syndication/atom/pull/95)

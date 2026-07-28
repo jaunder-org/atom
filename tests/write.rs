@@ -62,6 +62,26 @@ fn write_extension() {
 }
 
 #[test]
+fn write_standalone_entry() {
+    let file = File::open("tests/data/standalone_entry.xml").unwrap();
+    let entry = Entry::read_from(BufReader::new(file)).unwrap();
+    let out = entry.to_string();
+    // A standalone entry document declares the Atom namespace on its root.
+    assert!(
+        out.starts_with("<?xml version=\"1.0\"?>\n<entry xmlns=\"http://www.w3.org/2005/Atom\">"),
+        "out: {out}"
+    );
+    assert_eq!(out.parse::<Entry>().unwrap(), entry);
+}
+
+#[test]
+fn write_embedded_entry_does_not_redeclare_xmlns() {
+    let feed = feed!("tests/data/entry.xml");
+    let out = feed.to_string();
+    assert!(!out.contains("<entry xmlns"), "out: {out}");
+}
+
+#[test]
 fn write_content_roundtrip() {
     let mut content = Content::default();
     content.set_base("http://example.com/blog/".to_string());
