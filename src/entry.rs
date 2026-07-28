@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::str::FromStr;
 
@@ -19,7 +20,9 @@ use crate::person::Person;
 use crate::source::Source;
 use crate::text::Text;
 use crate::toxml::{ToXml, WriterExt};
-use crate::util::{atom_datetime, atom_text, decode, default_fixed_datetime, skip, FixedDateTime};
+use crate::util::{
+    atom_datetime, atom_text, attr_value, decode, default_fixed_datetime, skip, FixedDateTime,
+};
 
 /// Represents an entry in an Atom feed
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -65,6 +68,9 @@ pub struct Entry {
     /// The extensions for this entry.
     #[cfg_attr(feature = "builders", builder(setter(each = "extension")))]
     pub extensions: ExtensionMap,
+    /// The namespaces present in the entry tag.
+    #[cfg_attr(feature = "builders", builder(setter(each = "namespace")))]
+    pub namespaces: BTreeMap<String, String>,
 }
 
 impl Entry {
@@ -508,6 +514,45 @@ impl Entry {
         self.extensions = extensions.into()
     }
 
+    /// Return the namespaces for this entry.
+    ///
+    /// Combined with the extension map, this allows resolving the namespace
+    /// URI an extension's prefix was bound to on the `<entry>` element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use atom_syndication::Entry;
+    ///
+    /// let mut entry = Entry::default();
+    /// let mut namespaces = BTreeMap::new();
+    /// namespaces.insert("ext".to_string(), "http://example.com".to_string());
+    /// entry.set_namespaces(namespaces);
+    /// assert_eq!(entry.namespaces().get("ext").map(|s| s.as_str()), Some("http://example.com"));
+    /// ```
+    pub fn namespaces(&self) -> &BTreeMap<String, String> {
+        &self.namespaces
+    }
+
+    /// Set the namespaces for this entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use atom_syndication::Entry;
+    ///
+    /// let mut entry = Entry::default();
+    /// entry.set_namespaces(BTreeMap::new());
+    /// ```
+    pub fn set_namespaces<V>(&mut self, namespaces: V)
+    where
+        V: Into<BTreeMap<String, String>>,
+    {
+        self.namespaces = namespaces.into()
+    }
+
     /// Attempt to read a standalone Atom entry from the reader.
     ///
     /// The prolog (XML declaration, processing instructions, comments) is
@@ -636,6 +681,11 @@ impl Entry {
         if declare_xmlns {
             element.push_attribute(("xmlns", "http://www.w3.org/2005/Atom"));
         }
+
+        for (ns, uri) in &self.namespaces {
+            element.push_attribute((format!("xmlns:{ns}").as_bytes(), uri.as_bytes()));
+        }
+
         writer
             .write_event(Event::Start(element))
             .map_err(XmlError::new)?;
@@ -682,9 +732,25 @@ impl Entry {
 }
 
 impl FromXml for Entry {
-    fn from_xml<B: BufRead>(reader: &mut Reader<B>, _: Attributes<'_>) -> Result<Self, Error> {
+    fn from_xml<B: BufRead>(
+        reader: &mut Reader<B>,
+        mut atts: Attributes<'_>,
+    ) -> Result<Self, Error> {
         let mut entry = Entry::default();
         let mut buf = Vec::new();
+
+        for att in atts.with_checks(false).flatten() {
+            match decode(att.key.as_ref(), reader)? {
+                Cow::Borrowed("xmlns:dc") => {}
+                key => {
+                    if let Some(ns) = key.strip_prefix("xmlns:") {
+                        entry
+                            .namespaces
+                            .insert(ns.to_string(), attr_value(&att, reader)?.to_string());
+                    }
+                }
+            }
+        }
 
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
@@ -788,6 +854,7 @@ impl Default for Entry {
             summary: None,
             content: None,
             extensions: ExtensionMap::default(),
+            namespaces: BTreeMap::default(),
         }
     }
 }

@@ -347,9 +347,14 @@ fn read_standalone_entry() {
     assert_eq!(entry.categories()[0].term(), "technology");
     assert_eq!(entry.links().len(), 1);
     assert_eq!(entry.links()[0].rel(), "edit");
-    // Foreign-markup extension is preserved in the extension map.
+    // Foreign-markup extension is preserved in the extension map, and its
+    // prefix is resolvable to a namespace URI via the namespaces map.
     let app = entry.extensions().get("app").unwrap();
     assert!(app.contains_key("control"));
+    assert_eq!(
+        entry.namespaces().get("app").map(String::as_str),
+        Some("http://www.w3.org/2007/app")
+    );
 }
 
 #[test]
