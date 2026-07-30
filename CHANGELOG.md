@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.12.10 - 2026-07-30
+
 - Add standalone entry I/O: `Entry::read_from`, `Entry::write_to`, `Entry::write_with_config`, and `FromStr`/`ToString` impls, mirroring the existing `Feed` API. Standalone serialization declares the Atom namespace on the `<entry>` root; entries embedded in a `<feed>` do not.
 - Add `Entry::namespaces`, mirroring `Feed::namespaces`: `xmlns:*` bindings on the `<entry>` element are captured on parse and re-emitted on write, so extension prefixes resolve to namespace URIs and standalone documents with prefixed extension markup stay namespace-valid across a round trip.
 
