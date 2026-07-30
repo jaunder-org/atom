@@ -1,8 +1,10 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
+use std::str::FromStr;
 
 use quick_xml::events::attributes::Attributes;
-use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Reader;
 use quick_xml::Writer;
 
@@ -11,13 +13,16 @@ use crate::content::Content;
 use crate::error::{Error, XmlError};
 use crate::extension::util::{extension_name, parse_extension};
 use crate::extension::ExtensionMap;
+use crate::feed::WriteConfig;
 use crate::fromxml::FromXml;
 use crate::link::Link;
 use crate::person::Person;
 use crate::source::Source;
 use crate::text::Text;
 use crate::toxml::{ToXml, WriterExt};
-use crate::util::{atom_datetime, atom_text, decode, default_fixed_datetime, skip, FixedDateTime};
+use crate::util::{
+    atom_datetime, atom_text, attr_value, decode, default_fixed_datetime, skip, FixedDateTime,
+};
 
 /// Represents an entry in an Atom feed
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -63,6 +68,9 @@ pub struct Entry {
     /// The extensions for this entry.
     #[cfg_attr(feature = "builders", builder(setter(each = "extension")))]
     pub extensions: ExtensionMap,
+    /// The namespaces present in the entry tag.
+    #[cfg_attr(feature = "builders", builder(setter(each = "namespace")))]
+    pub namespaces: BTreeMap<String, String>,
 }
 
 impl Entry {
@@ -505,12 +513,244 @@ impl Entry {
     {
         self.extensions = extensions.into()
     }
+
+    /// Return the namespaces for this entry.
+    ///
+    /// Combined with the extension map, this allows resolving the namespace
+    /// URI an extension's prefix was bound to on the `<entry>` element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use atom_syndication::Entry;
+    ///
+    /// let mut entry = Entry::default();
+    /// let mut namespaces = BTreeMap::new();
+    /// namespaces.insert("ext".to_string(), "http://example.com".to_string());
+    /// entry.set_namespaces(namespaces);
+    /// assert_eq!(entry.namespaces().get("ext").map(|s| s.as_str()), Some("http://example.com"));
+    /// ```
+    pub fn namespaces(&self) -> &BTreeMap<String, String> {
+        &self.namespaces
+    }
+
+    /// Set the namespaces for this entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use atom_syndication::Entry;
+    ///
+    /// let mut entry = Entry::default();
+    /// entry.set_namespaces(BTreeMap::new());
+    /// ```
+    pub fn set_namespaces<V>(&mut self, namespaces: V)
+    where
+        V: Into<BTreeMap<String, String>>,
+    {
+        self.namespaces = namespaces.into()
+    }
+
+    /// Attempt to read a standalone Atom entry from the reader.
+    ///
+    /// The prolog (XML declaration, processing instructions, comments) is
+    /// skipped; the first start tag must be `<entry>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atom_syndication::Entry;
+    ///
+    /// let xml = r#"<?xml version="1.0"?>
+    /// <entry xmlns="http://www.w3.org/2005/Atom"><title>Entry Title</title></entry>"#;
+    /// let entry = Entry::read_from(xml.as_bytes()).unwrap();
+    /// assert_eq!(entry.title(), "Entry Title");
+    /// ```
+    pub fn read_from<B: BufRead>(reader: B) -> Result<Entry, Error> {
+        let mut reader = Reader::from_reader(reader);
+        reader.config_mut().expand_empty_elements = true;
+
+        let mut buf = Vec::new();
+
+        loop {
+            match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
+                Event::Start(element) => {
+                    if decode(element.name().as_ref(), &reader)? == "entry" {
+                        return Entry::from_xml(&mut reader, element.attributes());
+                    } else {
+                        return Err(Error::InvalidStartTag);
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+
+            buf.clear();
+        }
+
+        Err(Error::Eof)
+    }
+
+    /// Attempt to write this Atom entry as a standalone document to a writer
+    /// using default `WriteConfig`.
+    ///
+    /// Unlike an entry embedded in a `<feed>`, a standalone `<entry>`
+    /// document declares the Atom namespace on its root element.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atom_syndication::Entry;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let entry = Entry {
+    ///     title: "Entry Title".into(),
+    ///     id: "Entry ID".into(),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let out = entry.write_to(Vec::new())?;
+    /// assert_eq!(&out, br#"<?xml version="1.0"?>
+    /// <entry xmlns="http://www.w3.org/2005/Atom"><title>Entry Title</title><id>Entry ID</id><updated>1970-01-01T00:00:00+00:00</updated></entry>"#);
+    /// # Ok(()) }
+    /// ```
+    pub fn write_to<W: Write>(&self, writer: W) -> Result<W, Error> {
+        self.write_with_config(writer, WriteConfig::default())
+    }
+
+    /// Attempt to write this Atom entry as a standalone document to a writer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atom_syndication::{Entry, WriteConfig};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let entry = Entry {
+    ///     title: "Entry Title".into(),
+    ///     id: "Entry ID".into(),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let mut out = Vec::new();
+    /// let config = WriteConfig {
+    ///     write_document_declaration: false,
+    ///     indent_size: Some(2),
+    /// };
+    /// entry.write_with_config(&mut out, config)?;
+    /// assert_eq!(&out, br#"<entry xmlns="http://www.w3.org/2005/Atom">
+    ///   <title>Entry Title</title>
+    ///   <id>Entry ID</id>
+    ///   <updated>1970-01-01T00:00:00+00:00</updated>
+    /// </entry>"#);
+    /// # Ok(()) }
+    /// ```
+    pub fn write_with_config<W: Write>(
+        &self,
+        writer: W,
+        write_config: WriteConfig,
+    ) -> Result<W, Error> {
+        let mut writer = match write_config.indent_size {
+            Some(indent_size) => Writer::new_with_indent(writer, b' ', indent_size),
+            None => Writer::new(writer),
+        };
+        if write_config.write_document_declaration {
+            writer
+                .write_event(Event::Decl(BytesDecl::new("1.0", None, None)))
+                .map_err(XmlError::new)?;
+            writer
+                .write_event(Event::Text(BytesText::from_escaped("\n")))
+                .map_err(XmlError::new)?;
+        }
+        self.to_xml_inner(&mut writer, true)?;
+        Ok(writer.into_inner())
+    }
+
+    /// Serializes the `<entry>` element. `declare_xmlns` controls whether the
+    /// root element declares the Atom namespace: standalone documents need it,
+    /// entries embedded in a `<feed>` inherit it from the feed root.
+    fn to_xml_inner<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        declare_xmlns: bool,
+    ) -> Result<(), XmlError> {
+        let name = "entry";
+        let mut element = BytesStart::new(name);
+        if declare_xmlns {
+            element.push_attribute(("xmlns", "http://www.w3.org/2005/Atom"));
+        }
+
+        for (ns, uri) in &self.namespaces {
+            element.push_attribute((format!("xmlns:{ns}").as_bytes(), uri.as_bytes()));
+        }
+
+        writer
+            .write_event(Event::Start(element))
+            .map_err(XmlError::new)?;
+        writer.write_object_named(&self.title, "title")?;
+        writer.write_text_element("id", &self.id)?;
+        writer.write_text_element("updated", &self.updated.to_rfc3339())?;
+        writer.write_objects_named(&self.authors, "author")?;
+        writer.write_objects(&self.categories)?;
+        writer.write_objects_named(&self.contributors, "contributor")?;
+        writer.write_objects(&self.links)?;
+
+        if let Some(ref published) = self.published {
+            writer.write_text_element("published", &published.to_rfc3339())?;
+        }
+
+        if let Some(ref rights) = self.rights {
+            writer.write_object_named(rights, "rights")?;
+        }
+
+        if let Some(ref source) = self.source {
+            writer.write_object(source)?;
+        }
+
+        if let Some(ref summary) = self.summary {
+            writer.write_object_named(summary, "summary")?;
+        }
+
+        if let Some(ref content) = self.content {
+            writer.write_object(content)?;
+        }
+
+        for map in self.extensions.values() {
+            for extensions in map.values() {
+                writer.write_objects(extensions)?;
+            }
+        }
+
+        writer
+            .write_event(Event::End(BytesEnd::new(name)))
+            .map_err(XmlError::new)?;
+
+        Ok(())
+    }
 }
 
 impl FromXml for Entry {
-    fn from_xml<B: BufRead>(reader: &mut Reader<B>, _: Attributes<'_>) -> Result<Self, Error> {
+    fn from_xml<B: BufRead>(
+        reader: &mut Reader<B>,
+        mut atts: Attributes<'_>,
+    ) -> Result<Self, Error> {
         let mut entry = Entry::default();
         let mut buf = Vec::new();
+
+        for att in atts.with_checks(false).flatten() {
+            match decode(att.key.as_ref(), reader)? {
+                Cow::Borrowed("xmlns:dc") => {}
+                key => {
+                    if let Some(ns) = key.strip_prefix("xmlns:") {
+                        entry
+                            .namespaces
+                            .insert(ns.to_string(), attr_value(&att, reader)?.to_string());
+                    }
+                }
+            }
+        }
 
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
@@ -578,49 +818,23 @@ impl FromXml for Entry {
 
 impl ToXml for Entry {
     fn to_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<(), XmlError> {
-        let name = "entry";
-        writer
-            .write_event(Event::Start(BytesStart::new(name)))
-            .map_err(XmlError::new)?;
-        writer.write_object_named(&self.title, "title")?;
-        writer.write_text_element("id", &self.id)?;
-        writer.write_text_element("updated", &self.updated.to_rfc3339())?;
-        writer.write_objects_named(&self.authors, "author")?;
-        writer.write_objects(&self.categories)?;
-        writer.write_objects_named(&self.contributors, "contributor")?;
-        writer.write_objects(&self.links)?;
+        self.to_xml_inner(writer, false)
+    }
+}
 
-        if let Some(ref published) = self.published {
-            writer.write_text_element("published", &published.to_rfc3339())?;
-        }
+impl FromStr for Entry {
+    type Err = Error;
 
-        if let Some(ref rights) = self.rights {
-            writer.write_object_named(rights, "rights")?;
-        }
+    fn from_str(s: &str) -> Result<Self, Error> {
+        Entry::read_from(s.as_bytes())
+    }
+}
 
-        if let Some(ref source) = self.source {
-            writer.write_object(source)?;
-        }
-
-        if let Some(ref summary) = self.summary {
-            writer.write_object_named(summary, "summary")?;
-        }
-
-        if let Some(ref content) = self.content {
-            writer.write_object(content)?;
-        }
-
-        for map in self.extensions.values() {
-            for extensions in map.values() {
-                writer.write_objects(extensions)?;
-            }
-        }
-
-        writer
-            .write_event(Event::End(BytesEnd::new(name)))
-            .map_err(XmlError::new)?;
-
-        Ok(())
+impl ToString for Entry {
+    fn to_string(&self) -> String {
+        let buf = self.write_to(Vec::new()).unwrap_or_default();
+        // this unwrap should be safe since the bytes written from the Entry are all valid utf8
+        String::from_utf8(buf).unwrap()
     }
 }
 
@@ -640,6 +854,7 @@ impl Default for Entry {
             summary: None,
             content: None,
             extensions: ExtensionMap::default(),
+            namespaces: BTreeMap::default(),
         }
     }
 }

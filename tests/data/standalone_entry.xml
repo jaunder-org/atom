@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">
+	<title>Entry Title</title>
+	<id>http://example.com/article/1</id>
+	<updated>2017-06-03T15:15:44-05:00</updated>
+	<published>2017-06-01T08:30:00-05:00</published>
+	<summary>Entry summary</summary>
+	<content type="html">&lt;p&gt;Entry body&lt;/p&gt;</content>
+	<category term="technology" />
+	<link rel="edit" href="http://example.com/article/1" />
+	<app:control><app:draft>yes</app:draft></app:control>
+</entry>
