@@ -2,6 +2,86 @@
 
 ## Unreleased
 
+## 0.13.0 - 2026-09-01
+
+- **Breaking:** Replace lossy extension maps with namespace-aware recursive extension trees. Extensions now preserve qualified attributes, duplicate children, and ordered mixed content.
+
+### Migration from 0.12
+
+`ExtensionMap` is removed. Replace the prefix-keyed `ExtensionMap` with
+`Vec<Extension>` on `Entry`, `Feed`, or `Person`. `Source` newly gains an
+extension collection. `Entry::namespaces` and `Feed::namespaces` are removed
+because namespace declarations are resolved while parsing and synthesized while
+writing.
+
+Before (0.12):
+
+```rust,ignore
+use std::collections::BTreeMap;
+use atom_syndication::extension::{Extension, ExtensionMap};
+
+let extensions: ExtensionMap = BTreeMap::from([(
+    "x".into(),
+    BTreeMap::from([(
+        "rating".into(),
+        vec![Extension {
+            name: "x:rating".into(),
+            value: Some("5".into()),
+            attrs: BTreeMap::from([("stars".into(), "5".into())]),
+            children: BTreeMap::new(),
+        }],
+    )]),
+)]);
+```
+
+After (0.13):
+
+```rust
+use atom_syndication::extension::{
+    ExpandedName, Extension, ExtensionAttribute, ExtensionContent,
+};
+use atom_syndication::Entry;
+
+let rating = Extension {
+    name: ExpandedName {
+        namespace_uri: Some("urn:example".into()),
+        local_name: "rating".into(),
+        preferred_prefix: Some("x".into()),
+    },
+    attributes: vec![ExtensionAttribute {
+        name: ExpandedName {
+            // Default namespaces do not apply to attributes.
+            namespace_uri: None,
+            local_name: "stars".into(),
+            preferred_prefix: None,
+        },
+        value: "5".into(),
+    }],
+    content: vec![ExtensionContent::Text("5".into())],
+};
+let mut entry = Entry::default();
+entry.set_extensions(vec![rating]);
+
+let rating = entry.extensions().iter().find(|extension| {
+    extension.name.namespace_uri.as_deref() == Some("urn:example")
+        && extension.name.local_name == "rating"
+});
+assert!(rating.is_some());
+```
+
+The former flat `name`, `value`, `attrs`, and `children` fields become
+`ExpandedName`, `ExtensionAttribute`, and ordered `ExtensionContent` values.
+XML spells each name as `local` or `prefix:local`; parsing resolves that source
+spelling to the namespace URI plus local name used for semantic lookup.
+`preferred_prefix` is serialization metadata, excluded from
+semantic identity; writers may choose a different prefix. Attributes are
+unordered but must have unique expanded names; mixed content is ordered.
+Unprefixed attributes remain unqualified even when their element is namespaced.
+
+This is also a breaking Serde data-shape change. Parsing malformed XML names now
+fails, and writing fails for malformed expanded names or duplicate
+expanded attribute names. No compatibility aliases are provided.
+
 ## 0.12.10 - 2026-07-30
 
 - Add standalone entry I/O: `Entry::read_from`, `Entry::write_to`, `Entry::write_with_config`, and `FromStr`/`ToString` impls, mirroring the existing `Feed` API. Standalone serialization declares the Atom namespace on the `<entry>` root; entries embedded in a `<feed>` do not.

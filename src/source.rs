@@ -8,6 +8,10 @@ use quick_xml::Writer;
 
 use crate::category::Category;
 use crate::error::{Error, XmlError};
+use crate::extension::util::{
+    is_extension, namespace_scope_from_attributes, parse_extension, NamespaceScope,
+};
+use crate::extension::Extension;
 use crate::fromxml::FromXml;
 use crate::generator::Generator;
 use crate::link::Link;
@@ -57,6 +61,9 @@ pub struct Source {
     pub rights: Option<Text>,
     /// A human-readable description or subtitle for the feed.
     pub subtitle: Option<Text>,
+    /// Namespace-aware extensions for this source.
+    #[cfg_attr(feature = "builders", builder(setter(each = "extension")))]
+    pub extensions: Vec<Extension>,
 }
 
 impl Source {
@@ -447,53 +454,121 @@ impl Source {
     {
         self.subtitle = subtitle.into()
     }
+
+    /// Return extensions directly attached to this source.
+    ///
+    /// Source extensions are [`Extension`] values, including any nested mixed
+    /// content.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atom_syndication::extension::{ExpandedName, Extension};
+    /// use atom_syndication::Source;
+    ///
+    /// let mut source = Source::default();
+    /// source.set_extensions(vec![Extension {
+    ///     name: ExpandedName {
+    ///         namespace_uri: Some("urn:example".into()),
+    ///         local_name: "rating".into(),
+    ///         preferred_prefix: Some("x".into()),
+    ///     },
+    ///     attributes: Vec::new(),
+    ///     content: Vec::new(),
+    /// }]);
+    ///
+    /// assert!(source.extensions().first().is_some());
+    /// ```
+    pub fn extensions(&self) -> &[Extension] {
+        &self.extensions
+    }
+
+    /// Replace extensions directly attached to this source.
+    ///
+    /// See [`Extension`] for name and content invariants.
+    pub fn set_extensions<V>(&mut self, extensions: V)
+    where
+        V: Into<Vec<Extension>>,
+    {
+        self.extensions = extensions.into();
+    }
 }
 
 impl FromXml for Source {
-    fn from_xml<B: BufRead>(reader: &mut Reader<B>, _: Attributes<'_>) -> Result<Self, Error> {
+    fn from_xml<B: BufRead>(reader: &mut Reader<B>, atts: Attributes<'_>) -> Result<Self, Error> {
+        let scope =
+            namespace_scope_from_attributes(reader, atts.clone(), &NamespaceScope::default())?;
+        Self::from_xml_with_scope(reader, atts, &scope)
+    }
+}
+
+impl Source {
+    /// Parses a source using namespace bindings inherited from its parent.
+    ///
+    /// Declarations on the source are included before child classification.
+    /// Only unprefixed Atom children use the established local-name parser;
+    /// foreign and explicitly prefixed Atom children remain extensions.
+    pub(crate) fn from_xml_with_scope<B: BufRead>(
+        reader: &mut Reader<B>,
+        atts: Attributes<'_>,
+        inherited: &NamespaceScope,
+    ) -> Result<Self, Error> {
+        let scope = namespace_scope_from_attributes(reader, atts, inherited)?;
         let mut source = Source::default();
         let mut buf = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
-                Event::Start(element) => match decode(element.name().as_ref(), reader)? {
-                    Cow::Borrowed("id") => source.id = atom_text(reader)?.unwrap_or_default(),
-                    Cow::Borrowed("title") => {
-                        source.title = Text::from_xml(reader, element.attributes())?
+                Event::Start(element) => {
+                    // Only unprefixed Atom names use local-name dispatch;
+                    // prefixed `title` remains extension content by contract.
+                    if is_extension(reader, &element, &scope)? {
+                        parse_extension(reader, &element, &scope, &mut source.extensions)?;
+                    } else {
+                        match decode(element.name().as_ref(), reader)? {
+                            Cow::Borrowed("id") => {
+                                source.id = atom_text(reader)?.unwrap_or_default()
+                            }
+                            Cow::Borrowed("title") => {
+                                source.title = Text::from_xml(reader, element.attributes())?
+                            }
+                            Cow::Borrowed("updated") => {
+                                source.updated =
+                                    atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
+                            }
+                            Cow::Borrowed("author") => source.authors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("category") => {
+                                source
+                                    .categories
+                                    .push(Category::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("contributor") => source.contributors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("generator") => {
+                                source.generator =
+                                    Some(Generator::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("icon") => source.icon = atom_text(reader)?,
+                            Cow::Borrowed("link") => {
+                                source.links.push(Link::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("logo") => source.logo = atom_text(reader)?,
+                            Cow::Borrowed("rights") => {
+                                source.rights = Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("subtitle") => {
+                                source.subtitle =
+                                    Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            _ => skip(element.name(), reader)?,
+                        }
                     }
-                    Cow::Borrowed("updated") => {
-                        source.updated =
-                            atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
-                    }
-                    Cow::Borrowed("author") => source
-                        .authors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("category") => {
-                        source
-                            .categories
-                            .push(Category::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("contributor") => source
-                        .contributors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("generator") => {
-                        source.generator = Some(Generator::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("icon") => source.icon = atom_text(reader)?,
-                    Cow::Borrowed("link") => {
-                        source.links.push(Link::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("logo") => source.logo = atom_text(reader)?,
-                    Cow::Borrowed("rights") => {
-                        source.rights = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("subtitle") => {
-                        source.subtitle = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    _ => skip(element.name(), reader)?,
-                },
+                }
                 Event::End(_) => break,
                 Event::Eof => return Err(Error::Eof),
                 _ => {}
@@ -506,8 +581,17 @@ impl FromXml for Source {
     }
 }
 
-impl ToXml for Source {
-    fn to_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<(), XmlError> {
+impl Source {
+    /// Writes this source and its extensions with the caller's Atom namespace scope.
+    ///
+    /// The scope is forwarded unchanged to extension children because the
+    /// enclosing Atom element owns the default Atom binding; each extension
+    /// clones it before synthesizing declarations local to itself.
+    pub(crate) fn to_xml_with_scope<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        scope: &NamespaceScope,
+    ) -> Result<(), XmlError> {
         let name = "source";
         writer
             .write_event(Event::Start(BytesStart::new(name)))
@@ -541,11 +625,24 @@ impl ToXml for Source {
             writer.write_object_named(subtitle, "subtitle")?;
         }
 
+        for extension in &self.extensions {
+            extension.to_xml_with_scope(writer, scope)?;
+        }
+
         writer
             .write_event(Event::End(BytesEnd::new(name)))
             .map_err(XmlError::new)?;
 
         Ok(())
+    }
+}
+
+impl ToXml for Source {
+    fn to_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<(), XmlError> {
+        self.to_xml_with_scope(
+            writer,
+            &NamespaceScope::from([(None, "http://www.w3.org/2005/Atom".to_string())]),
+        )
     }
 }
 
@@ -564,6 +661,7 @@ impl Default for Source {
             logo: None,
             rights: None,
             subtitle: None,
+            extensions: Vec::new(),
         }
     }
 }

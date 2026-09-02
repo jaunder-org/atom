@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::str::FromStr;
 
@@ -11,8 +10,10 @@ use quick_xml::Writer;
 use crate::category::Category;
 use crate::content::Content;
 use crate::error::{Error, XmlError};
-use crate::extension::util::{extension_name, parse_extension};
-use crate::extension::ExtensionMap;
+use crate::extension::util::{
+    is_extension, namespace_scope_from_attributes, parse_extension, NamespaceScope,
+};
+use crate::extension::Extension;
 use crate::feed::WriteConfig;
 use crate::fromxml::FromXml;
 use crate::link::Link;
@@ -20,9 +21,7 @@ use crate::person::Person;
 use crate::source::Source;
 use crate::text::Text;
 use crate::toxml::{ToXml, WriterExt};
-use crate::util::{
-    atom_datetime, atom_text, attr_value, decode, default_fixed_datetime, skip, FixedDateTime,
-};
+use crate::util::{atom_datetime, atom_text, decode, default_fixed_datetime, skip, FixedDateTime};
 
 /// Represents an entry in an Atom feed
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
@@ -67,10 +66,7 @@ pub struct Entry {
     pub content: Option<Content>,
     /// The extensions for this entry.
     #[cfg_attr(feature = "builders", builder(setter(each = "extension")))]
-    pub extensions: ExtensionMap,
-    /// The namespaces present in the entry tag.
-    #[cfg_attr(feature = "builders", builder(setter(each = "namespace")))]
-    pub namespaces: BTreeMap<String, String>,
+    pub extensions: Vec<Extension>,
 }
 
 impl Entry {
@@ -467,90 +463,41 @@ impl Entry {
         self.content = content.into();
     }
 
-    /// Return the extensions for this entry.
+    /// Return extensions directly attached to this entry.
+    ///
+    /// See [`Extension`] for the namespace-aware extension tree.
     ///
     /// # Examples
     ///
     /// ```
-    /// use std::collections::BTreeMap;
+    /// use atom_syndication::extension::{ExpandedName, Extension};
     /// use atom_syndication::Entry;
-    /// use atom_syndication::extension::{ExtensionMap, Extension};
-    ///
-    /// let extension = Extension::default();
-    ///
-    /// let mut item_map = BTreeMap::<String, Vec<Extension>>::new();
-    /// item_map.insert("ext:name".to_string(), vec![extension]);
-    ///
-    /// let mut extension_map = ExtensionMap::default();
-    /// extension_map.insert("ext".to_string(), item_map);
     ///
     /// let mut entry = Entry::default();
-    /// entry.set_extensions(extension_map);
-    /// assert_eq!(entry.extensions()
-    ///                 .get("ext")
-    ///                 .and_then(|m| m.get("ext:name"))
-    ///                 .map(|v| v.len()),
-    ///            Some(1));
+    /// entry.set_extensions(vec![Extension {
+    ///     name: ExpandedName {
+    ///         namespace_uri: Some("urn:example".into()),
+    ///         local_name: "rating".into(),
+    ///         preferred_prefix: Some("x".into()),
+    ///     },
+    ///     attributes: Vec::new(),
+    ///     content: Vec::new(),
+    /// }]);
+    ///
+    /// assert_eq!(entry.extensions()[0].name.local_name, "rating");
     /// ```
-    pub fn extensions(&self) -> &ExtensionMap {
+    pub fn extensions(&self) -> &[Extension] {
         &self.extensions
     }
 
-    /// Set the extensions for this entry.
+    /// Replace extensions directly attached to this entry.
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// use atom_syndication::Entry;
-    /// use atom_syndication::extension::ExtensionMap;
-    ///
-    /// let mut entry = Entry::default();
-    /// entry.set_extensions(ExtensionMap::default());
-    /// ```
+    /// Use [`Self::extensions`] to inspect the stored values.
     pub fn set_extensions<V>(&mut self, extensions: V)
     where
-        V: Into<ExtensionMap>,
+        V: Into<Vec<Extension>>,
     {
         self.extensions = extensions.into()
-    }
-
-    /// Return the namespaces for this entry.
-    ///
-    /// Combined with the extension map, this allows resolving the namespace
-    /// URI an extension's prefix was bound to on the `<entry>` element.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use atom_syndication::Entry;
-    ///
-    /// let mut entry = Entry::default();
-    /// let mut namespaces = BTreeMap::new();
-    /// namespaces.insert("ext".to_string(), "http://example.com".to_string());
-    /// entry.set_namespaces(namespaces);
-    /// assert_eq!(entry.namespaces().get("ext").map(|s| s.as_str()), Some("http://example.com"));
-    /// ```
-    pub fn namespaces(&self) -> &BTreeMap<String, String> {
-        &self.namespaces
-    }
-
-    /// Set the namespaces for this entry.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use atom_syndication::Entry;
-    ///
-    /// let mut entry = Entry::default();
-    /// entry.set_namespaces(BTreeMap::new());
-    /// ```
-    pub fn set_namespaces<V>(&mut self, namespaces: V)
-    where
-        V: Into<BTreeMap<String, String>>,
-    {
-        self.namespaces = namespaces.into()
     }
 
     /// Attempt to read a standalone Atom entry from the reader.
@@ -563,9 +510,9 @@ impl Entry {
     /// ```
     /// use atom_syndication::Entry;
     ///
-    /// let xml = r#"<?xml version="1.0"?>
+    /// let xml = br#"<?xml version="1.0"?>
     /// <entry xmlns="http://www.w3.org/2005/Atom"><title>Entry Title</title></entry>"#;
-    /// let entry = Entry::read_from(xml.as_bytes()).unwrap();
+    /// let entry = Entry::read_from(xml.as_slice()).unwrap();
     /// assert_eq!(entry.title(), "Entry Title");
     /// ```
     pub fn read_from<B: BufRead>(reader: B) -> Result<Entry, Error> {
@@ -682,10 +629,6 @@ impl Entry {
             element.push_attribute(("xmlns", "http://www.w3.org/2005/Atom"));
         }
 
-        for (ns, uri) in &self.namespaces {
-            element.push_attribute((format!("xmlns:{ns}").as_bytes(), uri.as_bytes()));
-        }
-
         writer
             .write_event(Event::Start(element))
             .map_err(XmlError::new)?;
@@ -706,7 +649,8 @@ impl Entry {
         }
 
         if let Some(ref source) = self.source {
-            writer.write_object(source)?;
+            let scope = NamespaceScope::from([(None, "http://www.w3.org/2005/Atom".to_string())]);
+            source.to_xml_with_scope(writer, &scope)?;
         }
 
         if let Some(ref summary) = self.summary {
@@ -717,10 +661,9 @@ impl Entry {
             writer.write_object(content)?;
         }
 
-        for map in self.extensions.values() {
-            for extensions in map.values() {
-                writer.write_objects(extensions)?;
-            }
+        let scope = NamespaceScope::from([(None, "http://www.w3.org/2005/Atom".to_string())]);
+        for extension in &self.extensions {
+            extension.to_xml_with_scope(writer, &scope)?;
         }
 
         writer
@@ -732,78 +675,84 @@ impl Entry {
 }
 
 impl FromXml for Entry {
-    fn from_xml<B: BufRead>(
+    fn from_xml<B: BufRead>(reader: &mut Reader<B>, atts: Attributes<'_>) -> Result<Self, Error> {
+        let scope =
+            namespace_scope_from_attributes(reader, atts.clone(), &NamespaceScope::default())?;
+        Self::from_xml_with_scope(reader, atts, &scope)
+    }
+}
+
+impl Entry {
+    /// Parses an entry's children using namespace bindings inherited from its parent.
+    ///
+    /// Declarations on the entry are applied before child names are classified.
+    /// Only unprefixed Atom children use local-name dispatch; foreign and
+    /// explicitly prefixed Atom children become extensions. XML and
+    /// namespace-resolution errors propagate.
+    pub(crate) fn from_xml_with_scope<B: BufRead>(
         reader: &mut Reader<B>,
-        mut atts: Attributes<'_>,
+        atts: Attributes<'_>,
+        inherited: &NamespaceScope,
     ) -> Result<Self, Error> {
+        let scope = namespace_scope_from_attributes(reader, atts, inherited)?;
         let mut entry = Entry::default();
         let mut buf = Vec::new();
 
-        for att in atts.with_checks(false).flatten() {
-            match decode(att.key.as_ref(), reader)? {
-                Cow::Borrowed("xmlns:dc") => {}
-                key => {
-                    if let Some(ns) = key.strip_prefix("xmlns:") {
-                        entry
-                            .namespaces
-                            .insert(ns.to_string(), attr_value(&att, reader)?.to_string());
-                    }
-                }
-            }
-        }
-
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
-                Event::Start(element) => match decode(element.name().as_ref(), reader)? {
-                    Cow::Borrowed("id") => entry.id = atom_text(reader)?.unwrap_or_default(),
-                    Cow::Borrowed("title") => {
-                        entry.title = Text::from_xml(reader, element.attributes())?
-                    }
-                    Cow::Borrowed("updated") => {
-                        entry.updated =
-                            atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
-                    }
-                    Cow::Borrowed("author") => entry
-                        .authors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("category") => {
-                        entry.categories.push(Category::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("contributor") => entry
-                        .contributors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("link") => {
-                        entry.links.push(Link::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("published") => entry.published = atom_datetime(reader)?,
-                    Cow::Borrowed("rights") => {
-                        entry.rights = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("source") => {
-                        entry.source = Some(Source::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("summary") => {
-                        entry.summary = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("content") => {
-                        entry.content = Some(Content::from_xml(reader, element.attributes())?)
-                    }
-                    n => {
-                        if let Some((ns, name)) = extension_name(n.as_ref()) {
-                            parse_extension(
-                                reader,
-                                element.attributes(),
-                                ns,
-                                name,
-                                &mut entry.extensions,
-                            )?;
-                        } else {
-                            skip(element.name(), reader)?;
+                Event::Start(element) => {
+                    // Only unprefixed Atom names may enter local-name dispatch;
+                    // prefixed `title` remains extension content by contract.
+                    if is_extension(reader, &element, &scope)? {
+                        parse_extension(reader, &element, &scope, &mut entry.extensions)?;
+                    } else {
+                        match decode(element.name().as_ref(), reader)? {
+                            Cow::Borrowed("id") => {
+                                entry.id = atom_text(reader)?.unwrap_or_default()
+                            }
+                            Cow::Borrowed("title") => {
+                                entry.title = Text::from_xml(reader, element.attributes())?
+                            }
+                            Cow::Borrowed("updated") => {
+                                entry.updated =
+                                    atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
+                            }
+                            Cow::Borrowed("author") => entry.authors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("category") => {
+                                entry.categories.push(Category::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("contributor") => entry.contributors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("link") => {
+                                entry.links.push(Link::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("published") => entry.published = atom_datetime(reader)?,
+                            Cow::Borrowed("rights") => {
+                                entry.rights = Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("source") => {
+                                entry.source = Some(Source::from_xml_with_scope(
+                                    reader,
+                                    element.attributes(),
+                                    &scope,
+                                )?)
+                            }
+                            Cow::Borrowed("summary") => {
+                                entry.summary = Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("content") => {
+                                entry.content =
+                                    Some(Content::from_xml(reader, element.attributes())?)
+                            }
+                            _ => skip(element.name(), reader)?,
                         }
                     }
-                },
+                }
                 Event::End(_) => break,
                 Event::Eof => return Err(Error::Eof),
                 _ => {}
@@ -853,8 +802,7 @@ impl Default for Entry {
             source: None,
             summary: None,
             content: None,
-            extensions: ExtensionMap::default(),
-            namespaces: BTreeMap::default(),
+            extensions: Vec::new(),
         }
     }
 }

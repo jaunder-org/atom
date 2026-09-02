@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::str::{self, FromStr};
 
@@ -10,8 +9,10 @@ use quick_xml::{Reader, Writer};
 use crate::category::Category;
 use crate::entry::Entry;
 use crate::error::{Error, XmlError};
-use crate::extension::util::{extension_name, parse_extension};
-use crate::extension::ExtensionMap;
+use crate::extension::util::{
+    is_extension, namespace_scope_from_attributes, parse_extension, NamespaceScope,
+};
+use crate::extension::Extension;
 use crate::fromxml::FromXml;
 use crate::generator::Generator;
 use crate::link::Link;
@@ -86,10 +87,7 @@ pub struct Feed {
     pub entries: Vec<Entry>,
     /// The extensions for the feed.
     #[cfg_attr(feature = "builders", builder(setter(each = "extension")))]
-    pub extensions: ExtensionMap,
-    /// The namespaces present in the feed tag.
-    #[cfg_attr(feature = "builders", builder(setter(each = "namespace")))]
-    pub namespaces: BTreeMap<String, String>,
+    pub extensions: Vec<Extension>,
     /// Base URL for resolving any relative references found in the element.
     pub base: Option<String>,
     /// Indicates the natural language for the element.
@@ -629,88 +627,42 @@ impl Feed {
         self.entries = entries.into();
     }
 
-    /// Return the extensions for this feed.
+    /// Return extensions directly attached to this feed.
+    ///
+    /// Feed extensions use the same namespace-aware [`Extension`] representation
+    /// as entry extensions.
     ///
     /// # Examples
     ///
     /// ```
-    /// use std::collections::BTreeMap;
+    /// use atom_syndication::extension::{ExpandedName, Extension};
     /// use atom_syndication::Feed;
-    /// use atom_syndication::extension::{ExtensionMap, Extension};
-    ///
-    /// let extension = Extension::default();
-    ///
-    /// let mut item_map = BTreeMap::<String, Vec<Extension>>::new();
-    /// item_map.insert("ext:name".to_string(), vec![extension]);
-    ///
-    /// let mut extension_map = ExtensionMap::default();
-    /// extension_map.insert("ext".to_string(), item_map);
     ///
     /// let mut feed = Feed::default();
-    /// feed.set_extensions(extension_map);
-    /// assert_eq!(feed.extensions()
-    ///                .get("ext")
-    ///                .and_then(|m| m.get("ext:name"))
-    ///                .map(|v| v.len()),
-    ///            Some(1));
+    /// feed.set_extensions(vec![Extension {
+    ///     name: ExpandedName {
+    ///         namespace_uri: Some("urn:example".into()),
+    ///         local_name: "rating".into(),
+    ///         preferred_prefix: Some("x".into()),
+    ///     },
+    ///     attributes: Vec::new(),
+    ///     content: Vec::new(),
+    /// }]);
+    ///
+    /// assert_eq!(feed.extensions().len(), 1);
     /// ```
-    pub fn extensions(&self) -> &ExtensionMap {
+    pub fn extensions(&self) -> &[Extension] {
         &self.extensions
     }
 
-    /// Set the extensions for this feed.
+    /// Replace extensions directly attached to this feed.
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// use atom_syndication::Feed;
-    /// use atom_syndication::extension::ExtensionMap;
-    ///
-    /// let mut feed = Feed::default();
-    /// feed.set_extensions(ExtensionMap::default());
-    /// ```
+    /// [`Self::extensions`] exposes the replacement as a slice.
     pub fn set_extensions<V>(&mut self, extensions: V)
     where
-        V: Into<ExtensionMap>,
+        V: Into<Vec<Extension>>,
     {
         self.extensions = extensions.into()
-    }
-
-    /// Return the namespaces for this feed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use atom_syndication::Feed;
-    ///
-    /// let mut namespaces = BTreeMap::new();
-    /// namespaces.insert("ext".to_string(), "http://example.com".to_string());
-    ///
-    /// let mut feed = Feed::default();
-    /// feed.set_namespaces(namespaces);
-    /// assert_eq!(feed.namespaces().get("ext").map(|s| s.as_str()), Some("http://example.com"));
-    /// ```
-    pub fn namespaces(&self) -> &BTreeMap<String, String> {
-        &self.namespaces
-    }
-
-    /// Set the namespaces for this feed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::BTreeMap;
-    /// use atom_syndication::Feed;
-    ///
-    /// let mut feed = Feed::default();
-    /// feed.set_namespaces(BTreeMap::new());
-    /// ```
-    pub fn set_namespaces<V>(&mut self, namespaces: V)
-    where
-        V: Into<BTreeMap<String, String>>,
-    {
-        self.namespaces = namespaces.into()
     }
 
     /// Return base URL of the feed.
@@ -745,6 +697,8 @@ impl FromXml for Feed {
         reader: &mut Reader<B>,
         mut atts: Attributes<'_>,
     ) -> Result<Self, Error> {
+        let scope =
+            namespace_scope_from_attributes(reader, atts.clone(), &NamespaceScope::default())?;
         let mut feed = Feed::default();
         let mut buf = Vec::new();
 
@@ -756,68 +710,60 @@ impl FromXml for Feed {
                 Cow::Borrowed("xml:lang") => {
                     feed.lang = Some(attr_value(&att, reader)?.to_string())
                 }
-                Cow::Borrowed("xmlns:dc") => {}
-                key => {
-                    if let Some(ns) = key.strip_prefix("xmlns:") {
-                        feed.namespaces
-                            .insert(ns.to_string(), attr_value(&att, reader)?.to_string());
-                    }
-                }
+                _ => {}
             }
         }
 
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
-                Event::Start(element) => match decode(element.name().as_ref(), reader)? {
-                    Cow::Borrowed("title") => {
-                        feed.title = Text::from_xml(reader, element.attributes())?
-                    }
-                    Cow::Borrowed("id") => feed.id = atom_text(reader)?.unwrap_or_default(),
-                    Cow::Borrowed("updated") => {
-                        feed.updated = atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
-                    }
-                    Cow::Borrowed("author") => feed
-                        .authors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("category") => {
-                        feed.categories.push(Category::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("contributor") => feed
-                        .contributors
-                        .push(Person::from_xml(reader, element.attributes())?),
-                    Cow::Borrowed("generator") => {
-                        feed.generator = Some(Generator::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("icon") => feed.icon = atom_text(reader)?,
-                    Cow::Borrowed("link") => {
-                        feed.links.push(Link::from_xml(reader, &element)?);
-                        skip(element.name(), reader)?;
-                    }
-                    Cow::Borrowed("logo") => feed.logo = atom_text(reader)?,
-                    Cow::Borrowed("rights") => {
-                        feed.rights = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("subtitle") => {
-                        feed.subtitle = Some(Text::from_xml(reader, element.attributes())?)
-                    }
-                    Cow::Borrowed("entry") => feed
-                        .entries
-                        .push(Entry::from_xml(reader, element.attributes())?),
-                    n => {
-                        if let Some((ns, name)) = extension_name(n.as_ref()) {
-                            parse_extension(
-                                reader,
-                                element.attributes(),
-                                ns,
-                                name,
-                                &mut feed.extensions,
-                            )?;
-                        } else {
-                            skip(element.name(), reader)?;
+                Event::Start(element) => {
+                    // Only unprefixed Atom names are core fields; foreign or
+                    // prefixed `title` remains extension content by contract.
+                    if is_extension(reader, &element, &scope)? {
+                        parse_extension(reader, &element, &scope, &mut feed.extensions)?;
+                    } else {
+                        match decode(element.name().as_ref(), reader)? {
+                            Cow::Borrowed("title") => {
+                                feed.title = Text::from_xml(reader, element.attributes())?
+                            }
+                            Cow::Borrowed("id") => feed.id = atom_text(reader)?.unwrap_or_default(),
+                            Cow::Borrowed("updated") => {
+                                feed.updated =
+                                    atom_datetime(reader)?.unwrap_or_else(default_fixed_datetime)
+                            }
+                            Cow::Borrowed("author") => feed.authors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("category") => {
+                                feed.categories.push(Category::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("contributor") => feed.contributors.push(
+                                Person::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            Cow::Borrowed("generator") => {
+                                feed.generator =
+                                    Some(Generator::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("icon") => feed.icon = atom_text(reader)?,
+                            Cow::Borrowed("link") => {
+                                feed.links.push(Link::from_xml(reader, &element)?);
+                                skip(element.name(), reader)?;
+                            }
+                            Cow::Borrowed("logo") => feed.logo = atom_text(reader)?,
+                            Cow::Borrowed("rights") => {
+                                feed.rights = Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("subtitle") => {
+                                feed.subtitle = Some(Text::from_xml(reader, element.attributes())?)
+                            }
+                            Cow::Borrowed("entry") => feed.entries.push(
+                                Entry::from_xml_with_scope(reader, element.attributes(), &scope)?,
+                            ),
+                            _ => skip(element.name(), reader)?,
                         }
                     }
-                },
+                }
                 Event::End(_) => break,
                 Event::Eof => return Err(Error::Eof),
                 _ => {}
@@ -835,10 +781,6 @@ impl ToXml for Feed {
         let name = "feed";
         let mut element = BytesStart::new(name);
         element.push_attribute(("xmlns", "http://www.w3.org/2005/Atom"));
-
-        for (ns, uri) in &self.namespaces {
-            element.push_attribute((format!("xmlns:{}", ns).as_bytes(), uri.as_bytes()));
-        }
 
         if let Some(ref base) = self.base {
             element.push_attribute(("xml:base", base.as_str()));
@@ -882,10 +824,9 @@ impl ToXml for Feed {
 
         writer.write_objects(&self.entries)?;
 
-        for map in self.extensions.values() {
-            for extensions in map.values() {
-                writer.write_objects(extensions)?;
-            }
+        let scope = NamespaceScope::from([(None, "http://www.w3.org/2005/Atom".to_string())]);
+        for extension in &self.extensions {
+            extension.to_xml_with_scope(writer, &scope)?;
         }
 
         writer
@@ -928,8 +869,7 @@ impl Default for Feed {
             rights: None,
             subtitle: None,
             entries: Vec::new(),
-            extensions: ExtensionMap::default(),
-            namespaces: BTreeMap::default(),
+            extensions: Vec::new(),
             base: None,
             lang: None,
         }

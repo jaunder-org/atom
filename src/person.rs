@@ -7,8 +7,10 @@ use quick_xml::Reader;
 use quick_xml::Writer;
 
 use crate::error::{Error, XmlError};
-use crate::extension::util::{extension_name, parse_extension};
-use crate::extension::ExtensionMap;
+use crate::extension::util::{
+    is_extension, namespace_scope_from_attributes, parse_extension, NamespaceScope,
+};
+use crate::extension::Extension;
 use crate::fromxml::FromXml;
 use crate::toxml::{ToXmlNamed, WriterExt};
 use crate::util::{atom_text, decode, skip};
@@ -33,7 +35,7 @@ pub struct Person {
     /// A Web page for the person.
     pub uri: Option<String>,
     /// A list of extensions for the person.
-    pub extensions: ExtensionMap,
+    pub extensions: Vec<Extension>,
 }
 
 impl Person {
@@ -133,61 +135,80 @@ impl Person {
         self.uri = uri.into()
     }
 
-    /// Return the extensions for this person.
+    /// Return extensions directly attached to this person.
+    ///
+    /// Use [`Extension`] for a namespace-aware person extension.
     ///
     /// # Examples
     ///
     /// ```
-    /// use atom_syndication::{Person, extension::ExtensionMap};
+    /// use atom_syndication::extension::{ExpandedName, Extension};
+    /// use atom_syndication::Person;
     ///
     /// let mut person = Person::default();
-    /// person.set_extensions(ExtensionMap::new());
-    /// assert_eq!(person.extensions().len(), 0);
+    /// person.set_extensions(vec![Extension {
+    ///     name: ExpandedName {
+    ///         namespace_uri: Some("urn:example".into()),
+    ///         local_name: "rating".into(),
+    ///         preferred_prefix: Some("x".into()),
+    ///     },
+    ///     attributes: Vec::new(),
+    ///     content: Vec::new(),
+    /// }]);
+    ///
+    /// assert_eq!(person.extensions().len(), 1);
     /// ```
-    pub fn extensions(&self) -> &ExtensionMap {
+    pub fn extensions(&self) -> &[Extension] {
         &self.extensions
     }
 
-    /// Set the extensions for this person.
+    /// Replace extensions directly attached to this person.
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// use atom_syndication::{Person, extension::ExtensionMap};
-    ///
-    /// let mut person = Person::default();
-    /// person.set_extensions(ExtensionMap::new());
-    /// ```
-    pub fn set_extensions(&mut self, extensions: ExtensionMap) {
+    /// [`Self::extensions`] returns the replacement in document order.
+    pub fn set_extensions(&mut self, extensions: Vec<Extension>) {
         self.extensions = extensions;
     }
 }
 
 impl FromXml for Person {
-    fn from_xml<B: BufRead>(reader: &mut Reader<B>, _: Attributes<'_>) -> Result<Self, Error> {
+    fn from_xml<B: BufRead>(reader: &mut Reader<B>, atts: Attributes<'_>) -> Result<Self, Error> {
+        Self::from_xml_with_scope(reader, atts, &NamespaceScope::default())
+    }
+}
+
+impl Person {
+    /// Parses a person using the namespace scope inherited from its parent.
+    ///
+    /// The person's own declarations are applied before its children are
+    /// classified. Only unprefixed Atom children use local-name dispatch;
+    /// foreign and explicitly prefixed Atom children remain extensions.
+    pub(crate) fn from_xml_with_scope<B: BufRead>(
+        reader: &mut Reader<B>,
+        atts: Attributes<'_>,
+        inherited: &NamespaceScope,
+    ) -> Result<Self, Error> {
+        let scope = namespace_scope_from_attributes(reader, atts, inherited)?;
         let mut person = Person::default();
         let mut buf = Vec::new();
 
         loop {
             match reader.read_event_into(&mut buf).map_err(XmlError::new)? {
-                Event::Start(element) => match decode(element.name().as_ref(), reader)? {
-                    Cow::Borrowed("name") => person.name = atom_text(reader)?.unwrap_or_default(),
-                    Cow::Borrowed("email") => person.email = atom_text(reader)?,
-                    Cow::Borrowed("uri") => person.uri = atom_text(reader)?,
-                    n => {
-                        if let Some((ns, name)) = extension_name(n.as_ref()) {
-                            parse_extension(
-                                reader,
-                                element.attributes(),
-                                ns,
-                                name,
-                                &mut person.extensions,
-                            )?;
-                        } else {
-                            skip(element.name(), reader)?;
+                Event::Start(element) => {
+                    // Only unprefixed Atom names use local-name parsing;
+                    // prefixed `name` remains extension content by contract.
+                    if is_extension(reader, &element, &scope)? {
+                        parse_extension(reader, &element, &scope, &mut person.extensions)?;
+                    } else {
+                        match decode(element.name().as_ref(), reader)? {
+                            Cow::Borrowed("name") => {
+                                person.name = atom_text(reader)?.unwrap_or_default()
+                            }
+                            Cow::Borrowed("email") => person.email = atom_text(reader)?,
+                            Cow::Borrowed("uri") => person.uri = atom_text(reader)?,
+                            _ => skip(element.name(), reader)?,
                         }
                     }
-                },
+                }
                 Event::End(_) => break,
                 Event::Eof => return Err(Error::Eof),
                 _ => {}
@@ -218,10 +239,9 @@ impl ToXmlNamed for Person {
             writer.write_text_element("uri", uri)?;
         }
 
-        for map in self.extensions.values() {
-            for extensions in map.values() {
-                writer.write_objects(extensions)?;
-            }
+        let scope = NamespaceScope::from([(None, "http://www.w3.org/2005/Atom".to_string())]);
+        for extension in &self.extensions {
+            extension.to_xml_with_scope(writer, &scope)?;
         }
 
         writer

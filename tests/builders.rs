@@ -2,7 +2,6 @@
 
 use atom_syndication::extension::*;
 use atom_syndication::*;
-use std::collections::BTreeMap;
 use std::str::FromStr;
 
 fn join_lines(text: &str) -> String {
@@ -17,7 +16,6 @@ fn test_builders() {
     ];
 
     let feed = FeedBuilder::default()
-        .namespace(("ext".to_string(), "http://example.com".to_string()))
         .title("Feed Title")
         .subtitle(Text::plain("Feed subtitle"))
         .id("urn:uuid:60a76c80-d399-11d9-b91C-0003939e0af6")
@@ -78,18 +76,24 @@ fn test_builders() {
                         .updated(FixedDateTime::from_str("2017-06-03T15:15:44-05:00").unwrap())
                         .build(),
                 )
-                .extension(("ext".to_string(), {
-                    let mut map = BTreeMap::new();
-                    map.insert(
-                        "title".to_string(),
-                        vec![ExtensionBuilder::default()
-                            .name("ext:title")
-                            .value("Title".to_string())
-                            .attr(("type".to_string(), "text".to_string()))
-                            .build()],
-                    );
-                    map
-                }))
+                .extension(
+                    ExtensionBuilder::default()
+                        .name(
+                            ExpandedNameBuilder::default()
+                                .namespace_uri(Some("http://example.com".to_string()))
+                                .local_name("title")
+                                .preferred_prefix(Some("ext".to_string()))
+                                .build(),
+                        )
+                        .attribute(
+                            ExtensionAttributeBuilder::default()
+                                .name(ExpandedNameBuilder::default().local_name("type").build())
+                                .value("text")
+                                .build(),
+                        )
+                        .content_item(ExtensionContent::Text("Title".to_string()))
+                        .build(),
+                )
                 .build(),
         )
         .build();
@@ -99,7 +103,7 @@ fn test_builders() {
         join_lines(
             r#"
                 <?xml version="1.0"?>
-                <feed xmlns="http://www.w3.org/2005/Atom" xmlns:ext="http://example.com">
+                <feed xmlns="http://www.w3.org/2005/Atom">
                     <title>Feed Title</title>
                     <id>urn:uuid:60a76c80-d399-11d9-b91C-0003939e0af6</id>
                     <updated>2017-06-03T15:15:44-05:00</updated>
@@ -153,7 +157,7 @@ fn test_builders() {
                         </source>
                         <summary>Entry summary</summary>
                         <content>Entry content</content>
-                        <ext:title type="text">Title</ext:title>
+                        <ext:title type="text" xmlns:ext="http://example.com">Title</ext:title>
                     </entry>
                 </feed>
             "#

@@ -16,14 +16,14 @@ Add the dependency to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-atom_syndication = "0.12"
+atom_syndication = "0.13"
 ```
 
 Or, if you want [Serde](https://github.com/serde-rs/serde) include the feature like this:
 
 ```toml
 [dependencies]
-atom_syndication = { version = "0.12", features = ["with-serde"] }
+atom_syndication = { version = "0.13", features = ["with-serde"] }
 ```
 
 The package includes a single crate named `atom_syndication`.
@@ -31,6 +31,39 @@ The package includes a single crate named `atom_syndication`.
 ```rust
 extern crate atom_syndication;
 ```
+
+## Namespace-aware extensions
+
+Extensions are represented by expanded names: a namespace URI plus local name.
+XML spells each name as `local` or `prefix:local`; parsing resolves that source
+spelling to an expanded name. This example reads an element-scoped namespace
+declaration, looks up the extension by expanded name, and round-trips it:
+
+```rust
+use atom_syndication::Entry;
+
+let xml = br#"<entry xmlns="http://www.w3.org/2005/Atom"><title>Example</title><x:rating xmlns:x="urn:example" x:stars="5"/></entry>"#;
+let entry = Entry::read_from(xml.as_slice()).unwrap();
+
+let rating = entry.extensions().iter().find(|extension| {
+    extension.name.namespace_uri.as_deref() == Some("urn:example")
+        && extension.name.local_name == "rating"
+});
+assert!(rating.is_some());
+
+let reparsed: Entry = entry.to_string().parse().unwrap();
+assert_eq!(
+    reparsed.extensions()[0].name.namespace_uri.as_deref(),
+    Some("urn:example")
+);
+```
+
+`preferred_prefix` is serialization metadata, not semantic identity: writing may
+choose a different prefix or declaration placement while
+preserving each expanded name, attribute, and mixed-content order. For the
+breaking 0.12 to 0.13 API change, including construction and lookup migration,
+see the
+[0.13 migration guide](CHANGELOG.md#0130---2026-09-01).
 
 ## Reading
 

@@ -1,6 +1,6 @@
 [package]
 name = "atom_syndication"
-version = "0.12.10"
+version = "0.13.0"
 authors = ["James Hurst <jh.jameshurst@gmail.com>"]
 edition = "2021"
 description = "Library for serializing the Atom web content syndication format"
@@ -23,3 +23,6 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 default = ["builders"]
 builders = ["derive_builder"]
 with-serde = ["serde", "chrono/serde"]
+
+[dev-dependencies]
+serde_json = "1.0"

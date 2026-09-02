@@ -68,7 +68,7 @@ fn write_standalone_entry() {
     let out = entry.to_string();
     // A standalone entry document declares the Atom namespace on its root.
     assert!(
-        out.starts_with("<?xml version=\"1.0\"?>\n<entry xmlns=\"http://www.w3.org/2005/Atom\" "),
+        out.starts_with("<?xml version=\"1.0\"?>\n<entry xmlns=\"http://www.w3.org/2005/Atom\">"),
         "out: {out}"
     );
     // The extension namespace declared on the parsed entry is re-emitted, so

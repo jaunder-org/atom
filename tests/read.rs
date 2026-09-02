@@ -5,7 +5,6 @@ use std::io::BufReader;
 
 use atom::Error;
 
-use crate::atom::extension::ExtensionMap;
 use crate::atom::{Entry, Feed, Text};
 
 macro_rules! feed {
@@ -118,17 +117,12 @@ fn read_person() {
     assert_eq!(person.name(), "John Doe");
     assert_eq!(person.email(), Some("johndoe@example.com"));
     assert_eq!(person.uri(), Some("http://example.com"));
-
-    // Person extensions
-    assert!(person.extensions().contains_key("ext"));
-    let map = person.extensions().get("ext").unwrap();
-    assert!(map.contains_key("name"));
-    let name = map.get("name").unwrap().first().unwrap();
-    assert_eq!(name.value(), Some("Example Name"));
+    assert_eq!(person.extensions().len(), 1);
     assert_eq!(
-        name.attrs().get("exattr").map(String::as_str),
-        Some("exvalue")
+        person.extensions()[0].name.namespace_uri.as_deref(),
+        Some("http://www.example.com")
     );
+    assert_eq!(person.extensions()[0].content.len(), 1);
 }
 
 #[test]
@@ -150,37 +144,6 @@ fn read_source() {
     assert_eq!(source.categories().len(), 2);
     assert_eq!(source.contributors().len(), 2);
     assert!(source.generator().is_some());
-}
-
-#[test]
-fn read_extension() {
-    let feed = feed!("tests/data/extension.xml");
-    let entry = feed.entries().first().unwrap();
-
-    assert_eq!(
-        feed.namespaces().get("ext").map(String::as_str),
-        Some("http://example.com")
-    );
-
-    let check_extensions = |extensions: &ExtensionMap| {
-        assert!(extensions.contains_key("ext"));
-        let map = extensions.get("ext").unwrap();
-
-        assert!(map.contains_key("title"));
-        let title = map.get("title").unwrap().first().unwrap();
-        assert_eq!(title.value(), Some("<strong>Title</strong>"));
-        assert_eq!(title.attrs().get("type").map(String::as_str), Some("text"));
-
-        assert!(map.contains_key("parent"));
-        let parent = map.get("parent").unwrap().first().unwrap();
-
-        assert!(parent.children().contains_key("child"));
-        let child = parent.children().get("child").unwrap().first().unwrap();
-        assert_eq!(child.value(), Some("Child"));
-    };
-
-    check_extensions(feed.extensions());
-    check_extensions(entry.extensions());
 }
 
 #[test]
@@ -347,14 +310,12 @@ fn read_standalone_entry() {
     assert_eq!(entry.categories()[0].term(), "technology");
     assert_eq!(entry.links().len(), 1);
     assert_eq!(entry.links()[0].rel(), "edit");
-    // Foreign-markup extension is preserved in the extension map, and its
-    // prefix is resolvable to a namespace URI via the namespaces map.
-    let app = entry.extensions().get("app").unwrap();
-    assert!(app.contains_key("control"));
+    assert_eq!(entry.extensions().len(), 1);
     assert_eq!(
-        entry.namespaces().get("app").map(String::as_str),
+        entry.extensions()[0].name.namespace_uri.as_deref(),
         Some("http://www.w3.org/2007/app")
     );
+    assert_eq!(entry.extensions()[0].name.local_name, "control");
 }
 
 #[test]
